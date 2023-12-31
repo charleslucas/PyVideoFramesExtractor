@@ -16,7 +16,7 @@ supported_frame_ext = ('.jpg', '.png')
 
 
 class FrameExtractor:
-    def __init__(self, video_file, output_dir, frame_ext='.jpg', sampling=-1):
+    def __init__(self, video_file, output_dir, frame_ext='.jpg', sampling=-1, tile_width=125, tile_height=125, stride=0):
         """Extract frames from video file and save them under a given output directory.
 
         Args:
@@ -25,6 +25,9 @@ class FrameExtractor:
             frame_ext (str)   : extracted frame file format
             sampling (int)    : sampling rate -- extract one frame every given number of seconds.
                                 Default=-1 for extracting all available frames
+            tile_width (int)       : # of horizontal pixels per tile.
+            tile_height (int)       : # of vertical pixels per tile.
+            stride (int)      : # of horizontal or vertical pixels to shift across the original image per tile.
         """
         # Check if given video file exists -- abort otherwise
         if osp.exists(video_file):
@@ -33,11 +36,18 @@ class FrameExtractor:
             raise FileExistsError('Video file {} does not exist.'.format(video_file))
 
         self.sampling = sampling
+        self.tile_width = tile_width
+        self.tile_height = tile_height
+        self.stride = stride
 
         # Create output directory for storing extracted frames
         self.output_dir = output_dir
-        if not osp.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+        output_dir_root = output_dir
+        output_dir_num = 0
+        while osp.exists(self.output_dir):
+            output_dir_num = output_dir_num + 1
+            self.output_dir = "{}.{}".format(output_dir_root, output_dir_num)
+        os.makedirs(self.output_dir)
 
         # Get extracted frame file format
         self.frame_ext = frame_ext
@@ -57,14 +67,48 @@ class FrameExtractor:
         if self.sampling != -1:
             self.video_length = self.video_length // self.sampling
 
+        self.video_height = self.video.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.video_width = self.video.get(cv2.CAP_PROP_FRAME_WIDTH)
+
+    # Chop a video frame into possibly overlapping tiles offset by a given stride
+    def chop_frame(self, frame_cnt, frame, video_width, video_height, tile_width, tile_height, stride):
+
+        video_basename = osp.basename(self.video_file).split('.')[0]
+        frame_rootname = "{}_{:08d}".format(video_basename, frame_cnt)
+
+        print('video_width={}, video_height={}, stride={}'.format(video_width, video_height, stride))
+
+        step_x = 0
+        tile_count_x = 0
+        while (step_x + tile_width) < video_width:
+            step_y = 0
+            tile_count_y = 0
+            while (step_y + tile_height) < video_height:
+                print('tile_count_x={}, tile_count_y={}, step_x={}, step_y={}, tile_width={}, tile_height={}'.format(tile_count_x, tile_count_y, step_x, step_y, tile_width, tile_height))
+                cropped_image = frame[step_y:(step_y+tile_height),step_x:(step_x+tile_width)]
+                curr_tile_filename = osp.join(self.output_dir, '{}_tile_x{:03d}_y{:03d}{}'.format(frame_rootname, tile_count_x, tile_count_y, self.frame_ext))
+                print('crop_y = {}:{}, crop_x = {}:{}, curr_tile_filename={}'.format(step_y, (step_y+tile_height), step_x, (step_x+tile_width), curr_tile_filename))
+                #cv2.imshow("tile", cropped_image)
+                #cv2.waitKey(0)
+                #cv2.destroyAllWindows()
+                cv2.imwrite(curr_tile_filename, cropped_image)
+                step_y = step_y + stride
+                tile_count_y = tile_count_y + 1
+            step_x = step_x + stride
+            tile_count_x = tile_count_x + 1
+
     def extract(self):
         # Get first frame
         success, frame = self.video.read()
         frame_cnt = 0
         while success:
-            # Write current frame
-            curr_frame_filename = osp.join(self.output_dir, "{:08d}{}".format(frame_cnt, self.frame_ext))
-            cv2.imwrite(curr_frame_filename, frame)
+            if self.stride == 0:
+                # Write current frame as a single file
+                video_basename = osp.basename(self.video_file).split('.')[0]
+                curr_frame_filename = osp.join(self.output_dir, "{}_{:08d}{}".format(video_basename, frame_cnt, self.frame_ext))
+                cv2.imwrite(curr_frame_filename, frame)
+            else:
+                self.chop_frame(frame_cnt, frame, self.video_width, self.video_height, self.tile_width, self.tile_height, self.stride)
 
             # Get next frame
             success, frame = self.video.read()
@@ -74,7 +118,6 @@ class FrameExtractor:
                 self.video.set(1, frame_cnt)
             else:
                 frame_cnt += 1
-
 
 global args_
 
@@ -87,7 +130,10 @@ def extract_video_frames(v_file):
             # Set up video extractor for given video file
             extractor = FrameExtractor(video_file=osp.join(args_.dir, v_file[0]),
                                        output_dir=osp.join(args_.output_root, v_file[1]),
-                                       sampling=args_.sampling)
+                                       sampling=args_.sampling,
+                                       tile_width=args_.tile_width,
+                                       tile_height=args_.tile_height,
+                                       stride=args_.stride)
             # Extract frames
             extractor.extract()
     else:
@@ -111,6 +157,9 @@ def main():
                         help="extract 1 frame every args.sampling seconds (default: extract all frames)")
     parser.add_argument('--output-root', type=str, default='extracted_frames', help="set output root directory")
     parser.add_argument('--workers', type=int, default=None, help="Set number of multiprocessing workers")
+    parser.add_argument('--tile_width', type=int, default=None, help="# of horizontal pixels per tile.")
+    parser.add_argument('--tile_height', type=int, default=None, help="# of vertical pixels per tile.")
+    parser.add_argument('--stride', type=int, default=0, help="# of horizontal or vertical pixels to shift across the original image per tile. (0=disabled)")
     args = parser.parse_args()
 
     # Extract frames from a (single) given video file
@@ -124,7 +173,7 @@ def main():
         # Set extracted frames output directory
         output_dir = osp.join(args.output_root, '{}_frames'.format(video_basename))
         # Set up video extractor for given video file
-        extractor = FrameExtractor(video_file=args.video, output_dir=output_dir, sampling=args.sampling)
+        extractor = FrameExtractor(video_file=args.video, output_dir=output_dir, sampling=args.sampling, tile_width=args.tile_width, tile_height=args.tile_height, stride=args.stride)
         # Extract frames
         extractor.extract()
 
